@@ -1,5 +1,7 @@
+import io
 import os
 import time
+import matplotlib.pyplot as plt
 import requests
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -12,17 +14,21 @@ TICKER_24H_URL = "https://data-api.binance.vision/api/v3/ticker/24hr"
 KLINES_URL = "https://data-api.binance.vision/api/v3/klines"
 
 
+def get_targets():
+    targets = []
+    if CHAT_ID and CHAT_ID.strip():
+        targets.append(("Siz", CHAT_ID.strip()))
+    if OTHER_CHAT_ID and OTHER_CHAT_ID.strip():
+        targets.append(("Boshqa foydalanuvchi", OTHER_CHAT_ID.strip()))
+    return targets
+
+
 def send_telegram(message):
     if not TELEGRAM_TOKEN:
         print("TELEGRAM_TOKEN topilmadi!")
         return
 
-    targets = []
-    if CHAT_ID:
-        targets.append(("Siz", CHAT_ID.strip()))
-    if OTHER_CHAT_ID:
-        targets.append(("Boshqa foydalanuvchi", OTHER_CHAT_ID.strip()))
-
+    targets = get_targets()
     if not targets:
         print("CHAT_ID yoki OTHER_CHAT_ID topilmadi!")
         return
@@ -38,14 +44,104 @@ def send_telegram(message):
         time.sleep(0.3)
 
 
-def get_btc_price():
-    params = {"symbol": "BTCUSDT", "interval": TIMEFRAME, "limit": 2}
-    resp = requests.get(KLINES_URL, params=params, timeout=10)
-    resp.raise_for_status()
-    data = resp.json()
-    # Oxirgi yopilgan shamning yopilish narxi
-    closed_price = float(data[-2][4])
-    return f"{closed_price:.2f}".rstrip("0").rstrip(".")
+def send_telegram_photo(image_bytes, caption=""):
+    if not TELEGRAM_TOKEN:
+        print("TELEGRAM_TOKEN topilmadi!")
+        return
+
+    targets = get_targets()
+    if not targets:
+        print("CHAT_ID yoki OTHER_CHAT_ID topilmadi!")
+        return
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
+    for label, target_id in targets:
+        files = {"photo": ("btc_status.png", image_bytes, "image/png")}
+        data = {"chat_id": target_id, "caption": caption, "parse_mode": "HTML"}
+        try:
+            image_bytes.seek(0)
+            resp = requests.post(url, data=data, files=files, timeout=20)
+            print(f"{label} ({target_id}) rasm javobi:", resp.status_code, resp.text)
+        except Exception as e:
+            print(f"{label} ({target_id}) rasm yuborishda xatolik:", e)
+        time.sleep(0.3)
+
+
+def get_btc_summary_and_chart():
+    # 24 soatlik o'zgarish va oxirgi 36 ta 15m sham
+    ticker_resp = requests.get(TICKER_24H_URL, params={"symbol": "BTCUSDT"}, timeout=15)
+    ticker_resp.raise_for_status()
+    ticker = ticker_resp.json()
+
+    klines_resp = requests.get(
+        KLINES_URL,
+        params={"symbol": "BTCUSDT", "interval": TIMEFRAME, "limit": 37},
+        timeout=15,
+    )
+    klines_resp.raise_for_status()
+    raw_klines = klines_resp.json()[:-1]  # faqat yopilgan shamlar
+
+    closes = [float(c[4]) for c in raw_klines]
+    current_price = closes[-1]
+
+    # 24 soatlik foiz o'zgarish
+    pct_24h = float(ticker.get("priceChangePercent", 0.0))
+
+    # Oxirgi 15m shamga nisbatan foiz o'zgarish
+    prev_close = closes[-2] if len(closes) >= 2 and closes[-2] != 0 else current_price
+    pct_15m = ((current_price - prev_close) / prev_close) * 100 if prev_close else 0.0
+
+    is_up = pct_24h >= 0
+    main_color = "#16a34a" if is_up else "#dc2626"
+    bg_color = "#0f172a"
+    panel_color = "#1e293b"
+    text_color = "#f8fafc"
+    muted_color = "#94a3b8"
+
+    fig, ax = plt.subplots(figsize=(8, 4.5), dpi=150)
+    fig.patch.set_facecolor(bg_color)
+    ax.set_facecolor(panel_color)
+
+    x_vals = list(range(1, len(closes) + 1))
+    ax.plot(x_vals, closes, color=main_color, linewidth=2.2)
+    ax.fill_between(x_vals, closes, min(closes), color=main_color, alpha=0.18)
+
+    sign_24h = "+" if pct_24h >= 0 else ""
+    sign_15m = "+" if pct_15m >= 0 else ""
+    trend_word = "O'SISH" if is_up else "PASAYISH"
+
+    ax.set_title(
+        f"BTC/USDT ({TIMEFRAME})  |  ${current_price:,.2f}  |  24h: {sign_24h}{pct_24h:.2f}% ({trend_word})",
+        color=text_color,
+        fontsize=11,
+        fontweight="bold",
+        pad=12,
+    )
+    ax.text(
+        0.02,
+        0.92,
+        f"Oxirgi 15m: {sign_15m}{pct_15m:.2f}%",
+        transform=ax.transAxes,
+        color=main_color,
+        fontsize=10,
+        fontweight="bold",
+    )
+
+    ax.tick_params(colors=muted_color, labelsize=9)
+    ax.grid(True, linestyle="--", alpha=0.2, color=muted_color)
+    for spine in ax.spines.values():
+        spine.set_color("#334155")
+
+    ax.set_xlabel(f"Oxirgi {len(closes)} ta yopilgan {TIMEFRAME} sham", color=muted_color, fontsize=9)
+    ax.set_ylabel("Narx (USDT)", color=muted_color, fontsize=9)
+
+    buf = io.BytesIO()
+    plt.tight_layout()
+    plt.savefig(buf, format="png")
+    plt.close(fig)
+    buf.seek(0)
+
+    return current_price, pct_24h, pct_15m, buf
 
 
 def get_all_usdt_symbols():
@@ -157,11 +253,18 @@ def main():
             time.sleep(0.5)
 
     try:
-        btc_price = get_btc_price()
-        status_msg = f"₿ BTC: <code>{btc_price}</code> USDT | Signallar: <b>{len(found)}</b>"
-        send_telegram(status_msg)
+        price, pct_24h, pct_15m, chart_buf = get_btc_summary_and_chart()
+        s24 = "+" if pct_24h >= 0 else ""
+        s15 = "+" if pct_15m >= 0 else ""
+        emoji = "📈" if pct_24h >= 0 else "📉"
+        caption = (
+            f"{emoji} <b>BTC/USDT</b>: <code>${price:,.2f}</code>\n"
+            f"📊 24 soat: <b>{s24}{pct_24h:.2f}%</b> | 15m: <b>{s15}{pct_15m:.2f}%</b>\n"
+            f"🎯 Topilgan SMC signallar: <b>{len(found)} ta</b>"
+        )
+        send_telegram_photo(chart_buf, caption=caption)
     except Exception as e:
-        print(f"BTC narxini olishda xatolik: {e}")
+        print(f"BTC grafik rasmni yuborishda xatolik: {e}")
 
     print(f"Tekshiruv tugadi. Jami {len(symbols)} ta juftlikdan topilgan signallar: {found}")
 
