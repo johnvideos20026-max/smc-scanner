@@ -1,4 +1,4 @@
-name: SMC Crypto Scanner
+name: BTC SMC Scanner
 
 on:
   schedule:
@@ -6,23 +6,24 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
+  scanner:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Kodni yuklab olish
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Python o'rnatish
+      - name: Python setup
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.11'
 
-      - name: Kutubxonalarni o'rnatish
+      - name: Install libraries
         run: pip install -r requirements.txt
 
-      - name: Skanerni ishga tushirish
+      - name: Run scanner
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
+          OTHER_CHAT_ID: ${{ secrets.OTHER_CHAT_ID }}
         run: python scanner.py
