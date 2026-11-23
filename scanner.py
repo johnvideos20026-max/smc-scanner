@@ -68,7 +68,6 @@ def send_telegram_photo(image_bytes, caption=""):
 
 
 def get_btc_summary_and_chart():
-    # 24 soatlik o'zgarish va oxirgi 36 ta 15m sham
     ticker_resp = requests.get(TICKER_24H_URL, params={"symbol": "BTCUSDT"}, timeout=15)
     ticker_resp.raise_for_status()
     ticker = ticker_resp.json()
@@ -79,15 +78,12 @@ def get_btc_summary_and_chart():
         timeout=15,
     )
     klines_resp.raise_for_status()
-    raw_klines = klines_resp.json()[:-1]  # faqat yopilgan shamlar
+    raw_klines = klines_resp.json()[:-1]
 
     closes = [float(c[4]) for c in raw_klines]
     current_price = closes[-1]
 
-    # 24 soatlik foiz o'zgarish
     pct_24h = float(ticker.get("priceChangePercent", 0.0))
-
-    # Oxirgi 15m shamga nisbatan foiz o'zgarish
     prev_close = closes[-2] if len(closes) >= 2 and closes[-2] != 0 else current_price
     pct_15m = ((current_price - prev_close) / prev_close) * 100 if prev_close else 0.0
 
@@ -180,8 +176,79 @@ def get_candles(symbol, interval="15m", limit=50):
             "high": float(c[2]),
             "low": float(c[3]),
             "close": float(c[4]),
+            "volume": float(c[5]),
         })
     return candles
+
+
+def analyze_srt_and_probabilities(candles, smc_direction=None):
+    if len(candles) < 25:
+        return None
+
+    last = candles[-1]
+    prev = candles[-2]
+    price = last["close"]
+
+    # Support va Resistance darajalari (oxirgi 25 ta yopilgan shamdan)
+    window = candles[-25:-1]
+    support = min(c["low"] for c in window)
+    resistance = max(c["high"] for c in window)
+    span = resistance - support
+    if span <= 0:
+        return None
+
+    # Narxning diapazondagi pozitsiyasi (0.0 = supportda, 1.0 = resistanceda)
+    pos_ratio = max(0.0, min(1.0, (price - support) / span))
+
+    # Hajm reaksiyasi
+    avg_vol = sum(c["volume"] for c in candles[-15:-1]) / 14.0
+    vol_boost = 6.0 if avg_vol > 0 and last["volume"] > avg_vol * 1.25 else 0.0
+
+    # Oxirgi sham yo'nalishi
+    last_green = last["close"] >= last["open"]
+    prev_green = prev["close"] >= prev["open"]
+
+    up_score = 50.0
+    srt_note = "Neytral zona"
+
+    # Support yaqinida reaksiya (o'sish ehtimolini oshiradi)
+    if pos_ratio <= 0.25:
+        up_score += 14.0
+        srt_note = "Support yaqinida (reaksiya zonasi)"
+        if last_green:
+            up_score += 6.0 + vol_boost
+            srt_note = "Supportdan yuqoriga qaytish (Bullish SRT)"
+    # Resistance yaqinida reaksiya (tushish ehtimolini oshiradi)
+    elif pos_ratio >= 0.75:
+        up_score -= 14.0
+        srt_note = "Resistance yaqinida (qarshilik zonasi)"
+        if not last_green:
+            up_score -= 6.0 + vol_boost
+            srt_note = "Resistancedan pastga qaytish (Bearish SRT)"
+    else:
+        if last_green and prev_green:
+            up_score += 4.0
+            srt_note = "O'rta zonada yuqori impuls"
+        elif not last_green and not prev_green:
+            up_score -= 4.0
+            srt_note = "O'rta zonada pastki impuls"
+
+    # SMC signal bilan moslik
+    if smc_direction == "LONG":
+        up_score += 10.0
+    elif smc_direction == "SHORT":
+        up_score -= 10.0
+
+    up_pct = int(round(max(15.0, min(85.0, up_score))))
+    down_pct = 100 - up_pct
+
+    return {
+        "support": f"{support:.6f}".rstrip("0").rstrip("."),
+        "resistance": f"{resistance:.6f}".rstrip("0").rstrip("."),
+        "srt_note": srt_note,
+        "up_pct": up_pct,
+        "down_pct": down_pct,
+    }
 
 
 def analyze_smc(candles):
@@ -205,10 +272,11 @@ def analyze_smc(candles):
 
     if swept_low and bullish_mss and bullish_fvg:
         return {
+            "side": "LONG",
             "direction": "🟢 LONG (Bullish SMC)",
             "price": c3["close"],
             "liquidity": f"{range_low:.6f}".rstrip("0").rstrip("."),
-            "fvg": f"{c1['high']:.6f} - {c3['low']:.6f}"
+            "fvg": f"{c1['high']:.6f} - {c3['low']:.6f}",
         }
 
     swept_high = max(c0["high"], c1["high"]) > range_high
@@ -217,57 +285,4 @@ def analyze_smc(candles):
     bearish_fvg = c3["high"] < c1["low"]
 
     if swept_high and bearish_mss and bearish_fvg:
-        return {
-            "direction": "🔴 SHORT (Bearish SMC)",
-            "price": c3["close"],
-            "liquidity": f"{range_high:.6f}".rstrip("0").rstrip("."),
-            "fvg": f"{c3['high']:.6f} - {c1['low']:.6f}"
-        }
-
-    return None
-
-
-def main():
-    symbols = get_all_usdt_symbols()
-    print(f"Jami tekshiriladigan USDT juftliklar soni: {len(symbols)}")
-
-    found = []
-    for idx, symbol in enumerate(symbols, start=1):
-        try:
-            candles = get_candles(symbol, TIMEFRAME)
-            signal = analyze_smc(candles)
-            if signal:
-                msg = (
-                    f"<b>{signal['direction']}</b>\n"
-                    f"🪙 Juftlik: <b>{symbol}</b> ({TIMEFRAME})\n"
-                    f"💰 Joriy narx: <code>{signal['price']}</code>\n"
-                    f"💧 Yechilgan likvidlik: <code>{signal['liquidity']}</code>\n"
-                    f"📊 FVG zonasi: <code>{signal['fvg']}</code>"
-                )
-                send_telegram(msg)
-                found.append(symbol)
-        except Exception as e:
-            print(f"{symbol} xatolik: {e}")
-
-        if idx % 20 == 0:
-            time.sleep(0.5)
-
-    try:
-        price, pct_24h, pct_15m, chart_buf = get_btc_summary_and_chart()
-        s24 = "+" if pct_24h >= 0 else ""
-        s15 = "+" if pct_15m >= 0 else ""
-        emoji = "📈" if pct_24h >= 0 else "📉"
-        caption = (
-            f"{emoji} <b>BTC/USDT</b>: <code>${price:,.2f}</code>\n"
-            f"📊 24 soat: <b>{s24}{pct_24h:.2f}%</b> | 15m: <b>{s15}{pct_15m:.2f}%</b>\n"
-            f"🎯 Topilgan SMC signallar: <b>{len(found)} ta</b>"
-        )
-        send_telegram_photo(chart_buf, caption=caption)
-    except Exception as e:
-        print(f"BTC grafik rasmni yuborishda xatolik: {e}")
-
-    print(f"Tekshiruv tugadi. Jami {len(symbols)} ta juftlikdan topilgan signallar: {found}")
-
-
-if __name__ == "__main__":
-    main()
+        return
