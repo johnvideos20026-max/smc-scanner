@@ -189,7 +189,6 @@ def analyze_srt_and_probabilities(candles, smc_direction=None):
     prev = candles[-2]
     price = last["close"]
 
-    # Support va Resistance darajalari (oxirgi 25 ta yopilgan shamdan)
     window = candles[-25:-1]
     support = min(c["low"] for c in window)
     resistance = max(c["high"] for c in window)
@@ -197,28 +196,23 @@ def analyze_srt_and_probabilities(candles, smc_direction=None):
     if span <= 0:
         return None
 
-    # Narxning diapazondagi pozitsiyasi (0.0 = supportda, 1.0 = resistanceda)
     pos_ratio = max(0.0, min(1.0, (price - support) / span))
 
-    # Hajm reaksiyasi
     avg_vol = sum(c["volume"] for c in candles[-15:-1]) / 14.0
     vol_boost = 6.0 if avg_vol > 0 and last["volume"] > avg_vol * 1.25 else 0.0
 
-    # Oxirgi sham yo'nalishi
     last_green = last["close"] >= last["open"]
     prev_green = prev["close"] >= prev["open"]
 
     up_score = 50.0
     srt_note = "Neytral zona"
 
-    # Support yaqinida reaksiya (o'sish ehtimolini oshiradi)
     if pos_ratio <= 0.25:
         up_score += 14.0
         srt_note = "Support yaqinida (reaksiya zonasi)"
         if last_green:
             up_score += 6.0 + vol_boost
             srt_note = "Supportdan yuqoriga qaytish (Bullish SRT)"
-    # Resistance yaqinida reaksiya (tushish ehtimolini oshiradi)
     elif pos_ratio >= 0.75:
         up_score -= 14.0
         srt_note = "Resistance yaqinida (qarshilik zonasi)"
@@ -233,7 +227,6 @@ def analyze_srt_and_probabilities(candles, smc_direction=None):
             up_score -= 4.0
             srt_note = "O'rta zonada pastki impuls"
 
-    # SMC signal bilan moslik
     if smc_direction == "LONG":
         up_score += 10.0
     elif smc_direction == "SHORT":
@@ -285,4 +278,74 @@ def analyze_smc(candles):
     bearish_fvg = c3["high"] < c1["low"]
 
     if swept_high and bearish_mss and bearish_fvg:
-        return
+        return {
+            "side": "SHORT",
+            "direction": "🔴 SHORT (Bearish SMC)",
+            "price": c3["close"],
+            "liquidity": f"{range_high:.6f}".rstrip("0").rstrip("."),
+            "fvg": f"{c3['high']:.6f} - {c1['low']:.6f}",
+        }
+
+    return None
+
+
+def main():
+    symbols = get_all_usdt_symbols()
+    print(f"Jami tekshiriladigan USDT juftliklar soni: {len(symbols)}")
+
+    found = []
+    for idx, symbol in enumerate(symbols, start=1):
+        try:
+            candles = get_candles(symbol, TIMEFRAME)
+            signal = analyze_smc(candles)
+            srt = analyze_srt_and_probabilities(candles, signal["side"] if signal else None)
+
+            if signal and srt:
+                msg = (
+                    f"<b>{signal['direction']}</b>\n"
+                    f"🪙 Juftlik: <b>{symbol}</b> ({TIMEFRAME})\n"
+                    f"💰 Joriy narx: <code>{signal['price']}</code>\n"
+                    f"💧 Yechilgan likvidlik: <code>{signal['liquidity']}</code>\n"
+                    f"📊 FVG zonasi: <code>{signal['fvg']}</code>\n"
+                    f"🧱 SRT: <b>{srt['srt_note']}</b>\n"
+                    f"📉 Support: <code>{srt['support']}</code> | 📈 Resistance: <code>{srt['resistance']}</code>\n"
+                    f"📊 Ehtimol: 🟢 O'sish <b>{srt['up_pct']}%</b> | 🔴 Tushish <b>{srt['down_pct']}%</b>"
+                )
+                send_telegram(msg)
+                found.append(symbol)
+        except Exception as e:
+            print(f"{symbol} xatolik: {e}")
+
+        if idx % 20 == 0:
+            time.sleep(0.5)
+
+    try:
+        btc_candles = get_candles("BTCUSDT", TIMEFRAME)
+        btc_srt = analyze_srt_and_probabilities(btc_candles)
+        price, pct_24h, pct_15m, chart_buf = get_btc_summary_and_chart()
+
+        s24 = "+" if pct_24h >= 0 else ""
+        s15 = "+" if pct_15m >= 0 else ""
+        emoji = "📈" if pct_24h >= 0 else "📉"
+
+        prob_line = ""
+        if btc_srt:
+            prob_line = (
+                f"\n🧱 SRT: <b>{btc_srt['srt_note']}</b>"
+                f"\n📊 Ehtimol: 🟢 O'sish <b>{btc_srt['up_pct']}%</b> | 🔴 Tushish <b>{btc_srt['down_pct']}%</b>"
+            )
+
+        caption = (
+            f"{emoji} <b>BTC/USDT</b>: <code>${price:,.2f}</code>\n"
+            f"📊 24 soat: <b>{s24}{pct_24h:.2f}%</b> | 15m: <b>{s15}{pct_15m:.2f}%</b>\n"
+            f"🎯 Topilgan signallar: <b>{len(found)} ta</b>{prob_line}"
+        )
+        send_telegram_photo(chart_buf, caption=caption)
+    except Exception as e:
+        print(f"BTC grafik rasmni yuborishda xatolik: {e}")
+
+    print(f"Tekshiruv tugadi. Jami {len(symbols)} ta juftlikdan topilgan signallar: {found}")
+
+
+if __name__ == "__main__":
+    main()
